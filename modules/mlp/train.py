@@ -236,11 +236,14 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
         'val_losses': [],
         'val_accs': [],
         'best_epoch': 0,
-        'best_val_acc': 0.0
+        'best_val_acc': 0.0,
+        'early_stopped': False,
+        'patience_counter': 0
     }
     
     best_val_acc = 0.0
     best_model_state = None
+    patience_counter = 0  # Counter for early stopping
     
     print(f"Starting training for {fold_name}:")
     print(f"  - Training samples: {len(train_dataset)}")
@@ -267,8 +270,8 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
         
         print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         
-        # Save best model
-        if val_acc > best_val_acc:
+        # Save best model and check for early stopping
+        if val_acc > best_val_acc + MIN_DELTA:
             # Final evaluation on validation set
             val_loss, val_acc = evaluate(model, val_loader, criterion, device, use_amp, is_binary)
             best_val_acc = val_acc  # Update the best validation accuracy
@@ -276,7 +279,18 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
             best_model_state = model.state_dict().copy()  # Save the current model state
             history['best_epoch'] = epoch
             history['best_val_acc'] = val_acc
+            patience_counter = 0  # Reset patience counter
             print(f"New best model with validation accuracy: {val_acc:.4f}")
+        else:
+            patience_counter += 1
+            print(f"No improvement in validation accuracy. Patience: {patience_counter}/{PATIENCE}")
+            
+            # Check if we should stop early
+            if patience_counter >= PATIENCE:
+                print(f"Early stopping triggered after {epoch+1} epochs")
+                history['early_stopped'] = True
+                history['patience_counter'] = patience_counter
+                break
     
     # Save training history
     save_json(history, output_dir / 'training_history.json')
@@ -315,6 +329,8 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
     final_train_acc = history['train_accs'][-1] if history['train_accs'] else 0.0
     
     print(f"\nTraining completed for {fold_name}")
+    if history.get('early_stopped', False):
+        print(f"Training stopped early due to no improvement for {PATIENCE} epochs")
     print(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch+1}")
     print(f"ROC AUC: {roc_auc:.4f}")
     
