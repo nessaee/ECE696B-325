@@ -19,10 +19,10 @@ import matplotlib.pyplot as plt
 import argparse
 import time
 
-# Add analysis directory to path to import utils
-# sys.path.append(str(Path(__file__).parent.parent.parent / 'analysis'))
-# from utils import FILTERED_CSV_FILE, ensure_dir
-FILTERED_CSV_FILE = './annotations.csv'
+# Path to the new annotation format files
+ANNOTATIONS_FILE = '../../data/dataset/labels/mlp/annotations.csv'
+METADATA_FILE = '../../data/dataset/labels/mlp/metadata.csv'
+
 # Constants
 NUM_FOLDS = 5
 NUM_MONTE_CARLO_ITERATIONS = 10000
@@ -32,10 +32,17 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 def load_filtered_data():
     """
-    Load the filtered dataset (no poor quality images)
+    Load the filtered dataset with the new annotation format
     """
-    print(f"Loading filtered data from: {FILTERED_CSV_FILE}")
-    df = pd.read_csv(FILTERED_CSV_FILE)
+    print(f"Loading annotations from: {ANNOTATIONS_FILE}")
+    annotations_df = pd.read_csv(ANNOTATIONS_FILE)
+    
+    print(f"Loading metadata from: {METADATA_FILE}")
+    metadata_df = pd.read_csv(METADATA_FILE)
+    
+    # Merge annotations with metadata
+    df = pd.merge(annotations_df, metadata_df, on='image_path', how='inner')
+    
     print(f"Loaded {len(df)} samples from {df['study_id'].nunique()} studies")
     return df
 
@@ -54,15 +61,14 @@ def get_study_statistics(df):
     study_stats['image_count'] = df.groupby('study_id').size()
     study_stats['biopsy_count'] = df.groupby('study_id')['biopsy_num'].nunique()
     
-    # Count images by class
-    # Note: Some images have multiple labels (e.g., "LSIL, NSA"), so we use str.contains
-    hsil_counts = df[df['label'].str.contains('HSIL')].groupby('study_id').size()
+    # Count images by class (exact match since new format has clean labels)
+    hsil_counts = df[df['label'] == 'HSIL'].groupby('study_id').size()
     study_stats['hsil_count'] = hsil_counts.reindex(study_stats.index, fill_value=0)
     
-    lsil_counts = df[df['label'].str.contains('LSIL')].groupby('study_id').size()
+    lsil_counts = df[df['label'] == 'LSIL'].groupby('study_id').size()
     study_stats['lsil_count'] = lsil_counts.reindex(study_stats.index, fill_value=0)
     
-    nsa_counts = df[df['label'].str.contains('NSA')].groupby('study_id').size()
+    nsa_counts = df[df['label'] == 'NSA'].groupby('study_id').size()
     study_stats['nsa_count'] = nsa_counts.reindex(study_stats.index, fill_value=0)
     
     # Calculate class proportions for each study
@@ -70,6 +76,10 @@ def get_study_statistics(df):
     study_stats['hsil_prop'] = study_stats['hsil_count'] / total
     study_stats['lsil_prop'] = study_stats['lsil_count'] / total
     study_stats['nsa_prop'] = study_stats['nsa_count'] / total
+    
+    # Add exposure time statistics
+    expo_time_mean = df.groupby('study_id')['expo_time'].mean()
+    study_stats['expo_time_mean'] = expo_time_mean.reindex(study_stats.index, fill_value=0)
     
     return study_stats
 
@@ -431,7 +441,7 @@ def visualize_splits(folds, study_stats, output_dir):
     plt.ylabel('Number of Images')
     plt.title('Label Distribution Across Folds')
     plt.xticks(x, fold_df['fold'])
-    plt.legend()
+    plt.legend(loc='lower left')
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
     plt.savefig(output_dir / 'label_distribution.png', dpi=300)
@@ -477,18 +487,19 @@ def save_splits(folds, df, output_dir):
     """
     ensure_dir(output_dir)
     
-    # Create a mapping from study_id to fold_idx
-    study_to_fold = {}
+    # Add a 'fold' column to the dataframe
+    df['fold'] = -1  # Initialize with -1 (no fold assigned)
+    
+    # Assign fold numbers based on study_id
     for fold_idx, studies in enumerate(folds):
-        for study_id in studies:
-            study_to_fold[study_id] = fold_idx
+        df.loc[df['study_id'].isin(studies), 'fold'] = fold_idx
     
-    # Add fold assignment to the dataframe
-    df['fold'] = df['study_id'].map(study_to_fold)
+    # Verify all samples have a fold assigned
+    assert (df['fold'] >= 0).all(), "Error: Some samples do not have a fold assigned"
     
-    # Save full dataset with fold assignments
-    df.to_csv(output_dir / 'dataset_with_folds.csv', index=False)
-    print(f"Saved complete dataset with fold assignments to {output_dir / 'dataset_with_folds.csv'}")
+    # Save the full dataset with fold assignments
+    df.to_csv(output_dir / 'all_folds.csv', index=False)
+    print(f"Saved full dataset with fold assignments to {output_dir / 'all_folds.csv'}")
     
     # Save individual fold files
     # for fold_idx in range(NUM_FOLDS):
@@ -502,15 +513,34 @@ def save_splits(folds, df, output_dir):
     
     print(f"Saved individual fold files to {output_dir}")
     
-    # Also save the study-to-fold mapping as JSON for reference
+    # Save the study-to-fold mapping as JSON for reference
     fold_dict = {}
     for fold_idx, studies in enumerate(folds):
         fold_dict[f"fold{fold_idx+1}"] = sorted(studies)
     
-    with open(output_dir / 'fold_assignments.json', 'w') as f:
+    with open(output_dir / 'study_fold_assignments.json', 'w') as f:
         json.dump(fold_dict, f, indent=2)
     
-    print(f"Saved fold assignments to {output_dir / 'fold_assignments.json'}")
+    print(f"Saved study fold assignments to {output_dir / 'study_fold_assignments.json'}")
+    
+    # Save image-based fold assignments in the same format as the reference file
+    image_fold_dict = {}
+    for fold_idx in range(NUM_FOLDS):
+        # Get all images for this fold
+        fold_images = df[df['fold'] == fold_idx]['image_path'].tolist()
+        image_fold_dict[f"fold{fold_idx+1}"] = sorted(fold_images)
+    
+    with open(output_dir / 'fold_assignments.json', 'w') as f:
+        json.dump(image_fold_dict, f, indent=2)
+    
+    print(f"Saved image fold assignments to {output_dir / 'fold_assignments.json'}")
+    
+    # Also save a copy to the data directory for easy access
+    data_dir = Path('../../data/dataset/labels/mlp')
+    with open(data_dir / 'fold_assignments.json', 'w') as f:
+        json.dump(image_fold_dict, f, indent=2)
+    
+    print(f"Saved image fold assignments to {data_dir / 'fold_assignments.json'}")
 
 
 def main():
@@ -522,8 +552,6 @@ def main():
                         help='Output directory (default: ./output)')
     parser.add_argument('--iterations', type=int, default=NUM_MONTE_CARLO_ITERATIONS,
                         help=f'Number of Monte Carlo iterations (default: {NUM_MONTE_CARLO_ITERATIONS})')
-    
-    # Add arguments for configurable weights
     parser.add_argument('--weight-image', type=float, default=1.0,
                         help='Weight for image count balance (default: 1.0)')
     parser.add_argument('--weight-hsil', type=float, default=2.0,
@@ -587,7 +615,9 @@ def main():
             'weight_image': args.weight_image,
             'weight_hsil': args.weight_hsil,
             'weight_lsil': args.weight_lsil,
-            'weight_nsa': args.weight_nsa
+            'weight_nsa': args.weight_nsa,
+            'annotations_file': ANNOTATIONS_FILE,
+            'metadata_file': METADATA_FILE
         }, f, indent=2)
     
     print("\nSplit creation complete!")
