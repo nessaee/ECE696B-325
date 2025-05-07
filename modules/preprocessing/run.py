@@ -388,17 +388,36 @@ def create_output_subdir(output_base: Path, input_path: Path, input_base: Path) 
     return output_subdir, input_path.stem
 
 
-def get_output_paths(output_subdir: Path, filename_stem: str) -> Dict[str, Path]:
+def get_output_paths(output_subdir: Path, filename_stem: str, save_opts: Dict[str, bool] = None) -> Dict[str, Path]:
     """Generate all output paths with subdirectory organization."""
+    # Default save options if none provided
+    if save_opts is None:
+        save_opts = {'normalized': True, 'entropy': True, 'depth': True, 'rgb': True, 'stacked': True, 'debug': True}
+    
     # Create subdirectories for different output types
     channels_dir = output_subdir / "channels"
     normalized_dir = output_subdir / "normalized"
     rgb_dir = output_subdir / "rgb"
     debug_dir = output_subdir / "debug"
-    mask_dir = output_subdir / "masks"
     
-    # Ensure all subdirectories exist
-    for directory in [channels_dir, normalized_dir, rgb_dir, debug_dir, mask_dir]:
+    # Only create directories that will be used
+    directories_to_create = []
+    
+    # Check which directories need to be created based on save options
+    if save_opts.get('normalized', False) or save_opts.get('entropy', False) or save_opts.get('depth', False):
+        directories_to_create.append(channels_dir)
+    
+    if save_opts.get('rgb', False):
+        directories_to_create.append(rgb_dir)
+    
+    if save_opts.get('stacked', False):
+        directories_to_create.append(normalized_dir)
+    
+    if save_opts.get('debug', False):
+        directories_to_create.append(debug_dir)
+    
+    # Create only the needed directories
+    for directory in directories_to_create:
         directory.mkdir(parents=True, exist_ok=True)
     
     return {
@@ -416,10 +435,7 @@ def get_output_paths(output_subdir: Path, filename_stem: str) -> Dict[str, Path]
         'stacked': normalized_dir / f"{filename_stem}.png",
         
         # Debug visualizations in debug directory
-        'debug': debug_dir / f"{filename_stem}.jpg",
-        
-        # Masks in masks directory
-        'mask': mask_dir / f"{filename_stem}.png"
+        'debug': debug_dir / f"{filename_stem}.jpg"
     }
 
 
@@ -819,7 +835,7 @@ def rename_and_collect_metadata(
             clean_biopsy = re.sub(r'[^0-9]', '', biopsy_num_match)
             
             # Create standardized filename stem and full filename
-            new_filename_stem = f"{study_id_match}_{biopsy_num_match}_{frame_number}"
+            new_filename_stem = f"{study_id_match}_{biopsy_num_match}_{round(float(expo_time) * 1000)}_{frame_number}"
             new_filename = f"{new_filename_stem}{file_extension}"
             
             # Define the destination path
@@ -933,11 +949,8 @@ def process_image(task_obj: Dict[str, Any], save_opts: Dict[str, bool] = None, m
     
     start_time = time.time(); logger.info(f"Processing: {img_path.name}")
     try:
-        paths = get_output_paths(output_subdir, filename_stem)
-        
-        # Create output directories if they don't exist
-        for path in paths.values():
-            path.parent.mkdir(parents=True, exist_ok=True)
+        # Get output paths and create only needed directories
+        paths = get_output_paths(output_subdir, filename_stem, save_opts)
         
         # Read source image
         img_orig = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)

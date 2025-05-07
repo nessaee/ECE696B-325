@@ -4,11 +4,11 @@
 
 # Default settings
 DATA_PATH="../../data/dataset/original"
-METADATA_PATH="../../data/dataset/labels/metadata.csv"
-ANNOTATIONS_PATH="../../data/dataset/labels/annotations.csv"
+METADATA_PATH="../../data/dataset/labels/preprocess/metadata.csv"
+ANNOTATIONS_PATH="../../data/dataset/labels/preprocess/annotations.csv"
 
 OUTPUT_PATH="../../data/dataset/processed/"
-OUTPUT_TYPES="stacked rgb"
+OUTPUT_TYPES="stacked rgb normalized entropy depth"
 PARALLEL_JOBS=16
 EXTRAS="--calculate-stats"
 
