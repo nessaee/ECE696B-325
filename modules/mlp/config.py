@@ -6,16 +6,16 @@ Contains shared parameters, paths, and constants used across the codebase.
 from pathlib import Path
 
 # Base directories
-BASE_DATA_DIR = Path("../../data")
+BASE_DATA_DIR = Path("../../data/dataset")
 BASE_RESULTS_DIR = Path("../../results")
-DATASET_DIR = BASE_DATA_DIR / "dataset"
+DATASET_DIR = BASE_DATA_DIR / "processed"
 FEATURES_DIR = BASE_DATA_DIR / "features"  # Will be appended with version in code
 OUTPUT_DIR = BASE_RESULTS_DIR / "mlp_training_output"  # Will be appended with version in code
 VISUALIZATIONS_DIR = BASE_RESULTS_DIR / "visualizations"
 
 # Dataset parameters
-ANNOTATIONS_FILE = DATASET_DIR / "annotations.csv"
-FOLD_ASSIGNMENTS_FILE = DATASET_DIR / "fold_assignments.json"
+ANNOTATIONS_FILE = BASE_DATA_DIR / "labels/mlp/annotations.csv"
+FOLD_ASSIGNMENTS_FILE = BASE_DATA_DIR / "labels/mlp/fold_assignments.json"
 
 # Image parameters
 IMAGE_SIZE = (224, 224)
