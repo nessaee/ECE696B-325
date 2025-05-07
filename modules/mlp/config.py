@@ -70,7 +70,7 @@ USE_AMP = True  # Automatic Mixed Precision
 GRAD_CLIP = None  # Set to a value (e.g., 1.0) to enable gradient clipping
 
 # Early stopping parameters
-PATIENCE = 10
+PATIENCE = 25
 MIN_DELTA = 0.001
 
 # Random seed for reproducibility

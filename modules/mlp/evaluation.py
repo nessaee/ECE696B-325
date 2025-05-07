@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
 from pathlib import Path
 import json
+import os
 
 def evaluate(model, val_loader, criterion, device, use_amp=False, is_binary=False):
     """
@@ -312,3 +313,152 @@ def plot_precision_recall_curves(folds_data, output_dir):
     
     print(f"Saved precision-recall curves to {output_path}")
     return mean_ap, std_ap
+
+
+def plot_training_curves(fold_name, history, output_dir):
+    """
+    Plot training and validation loss/accuracy curves for a single fold.
+    
+    Args:
+        fold_name: Name of the fold
+        history: Dictionary containing training history with keys:
+                 'train_losses', 'val_losses', 'train_accs', 'val_accs'
+        output_dir: Directory to save the plots
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    epochs = range(1, len(history['train_losses']) + 1)
+    
+    # Create figure with two subplots (loss and accuracy)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot loss curves
+    ax1.plot(epochs, history['train_losses'], 'b-', label='Training Loss')
+    ax1.plot(epochs, history['val_losses'], 'r-', label='Validation Loss')
+    ax1.set_title(f'{fold_name} - Loss Curves')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+    
+    # Plot accuracy curves
+    ax2.plot(epochs, history['train_accs'], 'b-', label='Training Accuracy')
+    ax2.plot(epochs, history['val_accs'], 'r-', label='Validation Accuracy')
+    ax2.set_title(f'{fold_name} - Accuracy Curves')
+    ax2.set_xlabel('Epochs')
+    ax2.set_ylabel('Accuracy')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    
+    # Mark the best epoch
+    best_epoch = history.get('best_epoch', 0)
+    if best_epoch > 0:
+        ax1.axvline(x=best_epoch+1, color='g', linestyle='--', alpha=0.7, label=f'Best Epoch ({best_epoch+1})')
+        ax2.axvline(x=best_epoch+1, color='g', linestyle='--', alpha=0.7, label=f'Best Epoch ({best_epoch+1})')
+        ax1.legend()
+        ax2.legend()
+    
+    plt.tight_layout()
+    plt.savefig(output_path / f'{fold_name}_training_curves.png', dpi=300, bbox_inches='tight')
+    # plt.savefig(output_path / f'{fold_name}_training_curves.pdf', bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved training curves for {fold_name} to {output_path}")
+
+
+def plot_combined_training_curves(fold_histories, output_dir):
+    """
+    Plot combined training and validation loss/accuracy curves for all folds.
+    
+    Args:
+        fold_histories: Dictionary mapping fold names to their training histories
+        output_dir: Directory to save the plots
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    # Create figure with two subplots (loss and accuracy)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Colors for different folds
+    colors = ['b', 'r', 'g', 'c', 'm', 'y', 'k']
+    
+    # Track mean values across folds
+    all_train_losses = []
+    all_val_losses = []
+    all_train_accs = []
+    all_val_accs = []
+    max_epochs = 0
+    
+    for i, (fold_name, history) in enumerate(fold_histories.items()):
+        color = colors[i % len(colors)]
+        epochs = range(1, len(history['train_losses']) + 1)
+        max_epochs = max(max_epochs, len(epochs))
+        
+        # Pad histories to ensure they're all the same length
+        train_losses = history['train_losses']
+        val_losses = history['val_losses']
+        train_accs = history['train_accs']
+        val_accs = history['val_accs']
+        
+        all_train_losses.append(train_losses)
+        all_val_losses.append(val_losses)
+        all_train_accs.append(train_accs)
+        all_val_accs.append(val_accs)
+        
+        # Plot individual fold curves with low alpha
+        ax1.plot(epochs, train_losses, color=color, linestyle='-', alpha=0.3)
+        ax1.plot(epochs, val_losses, color=color, linestyle='--', alpha=0.3)
+        
+        ax2.plot(epochs, train_accs, color=color, linestyle='-', alpha=0.3)
+        ax2.plot(epochs, val_accs, color=color, linestyle='--', alpha=0.3)
+    
+    # Compute means (pad shorter sequences with NaN)
+    def pad_and_stack(sequences, max_len):
+        padded = []
+        for seq in sequences:
+            padded_seq = seq + [float('nan')] * (max_len - len(seq))
+            padded.append(padded_seq)
+        return np.array(padded)
+    
+    # Pad sequences and compute means
+    if fold_histories:
+        train_losses_padded = pad_and_stack(all_train_losses, max_epochs)
+        val_losses_padded = pad_and_stack(all_val_losses, max_epochs)
+        train_accs_padded = pad_and_stack(all_train_accs, max_epochs)
+        val_accs_padded = pad_and_stack(all_val_accs, max_epochs)
+        
+        # Compute means ignoring NaN values
+        mean_train_losses = np.nanmean(train_losses_padded, axis=0)
+        mean_val_losses = np.nanmean(val_losses_padded, axis=0)
+        mean_train_accs = np.nanmean(train_accs_padded, axis=0)
+        mean_val_accs = np.nanmean(val_accs_padded, axis=0)
+        
+        # Plot mean curves
+        epochs = range(1, max_epochs + 1)
+        ax1.plot(epochs, mean_train_losses, 'b-', linewidth=2, label='Mean Train Loss')
+        ax1.plot(epochs, mean_val_losses, 'r-', linewidth=2, label='Mean Val Loss')
+        
+        ax2.plot(epochs, mean_train_accs, 'b-', linewidth=2, label='Mean Train Acc')
+        ax2.plot(epochs, mean_val_accs, 'r-', linewidth=2, label='Mean Val Acc')
+    
+    # Set titles and labels
+    ax1.set_title('Loss Curves (All Folds)')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+    
+    ax2.set_title('Accuracy Curves (All Folds)')
+    ax2.set_xlabel('Epochs')
+    ax2.set_ylabel('Accuracy')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'combined_training_curves.png', dpi=300, bbox_inches='tight')
+    # plt.savefig(output_path / 'combined_training_curves.pdf', bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved combined training curves to {output_path}")

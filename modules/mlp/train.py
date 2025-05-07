@@ -20,7 +20,7 @@ from config import (
 )
 from utils import set_seed, get_device, save_json
 from model import MLPClassifier
-from evaluation import evaluate, compute_roc_data, generate_tables, plot_roc_curves
+from evaluation import evaluate, compute_roc_data, generate_tables, plot_roc_curves, plot_training_curves, plot_combined_training_curves
 
 
 class FeatureDataset(torch.utils.data.Dataset):
@@ -295,6 +295,9 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
     # Save training history
     save_json(history, output_dir / 'training_history.json')
     
+    # Plot training curves
+    plot_training_curves(fold_name, history, output_dir)
+    
     # Save best model
     if best_model_state is not None:
         torch.save(best_model_state, output_dir / 'best_model.pt')
@@ -447,6 +450,7 @@ def main():
     # Store results
     fold_results = {}
     folds_roc_data = {}
+    fold_histories = {}
     
     # Train on each fold
     all_results = []
@@ -472,6 +476,13 @@ def main():
         labels, probs = compute_roc_data(model, val_loader, device, USE_AMP, is_binary)
         folds_roc_data[fold_name] = {'labels': labels, 'probs': probs}
         
+        # Load training history
+        history_path = Path(OUTPUT_DIR) / data_version / fold_name / 'training_history.json'
+        if history_path.exists():
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+                fold_histories[fold_name] = history
+        
         # Store results
         fold_results[fold_name] = {
             'train_acc': train_acc,
@@ -484,6 +495,10 @@ def main():
     
     # Plot combined ROC curves
     mean_auc, std_auc = plot_roc_curves(folds_roc_data, output_dir)
+    
+    # Plot combined training curves
+    if fold_histories:
+        plot_combined_training_curves(fold_histories, output_dir)
     
     # Create summary
     summary = {
