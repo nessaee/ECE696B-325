@@ -3,7 +3,7 @@
 # Enhanced run script for the modular preprocessing pipeline
 
 # Default settings
-DATA_PATH="../../data/dataset/original"
+DATA_PATH="../../data/dataset/raw"
 METADATA_PATH="../../data/dataset/labels/preprocess/metadata.csv"
 ANNOTATIONS_PATH="../../data/dataset/labels/preprocess/annotations.csv"
 

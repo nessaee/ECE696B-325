@@ -1,4 +1,8 @@
-data
+# data
+*.tif
+*.png
+*.pt
+*.txt
 results
 report
 *__pycache__*
