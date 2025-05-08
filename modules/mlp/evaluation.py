@@ -6,14 +6,16 @@ Provides functions for model evaluation, metrics computation, and results visual
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, confusion_matrix, f1_score, precision_score, recall_score
 from pathlib import Path
 import json
 import os
+import pandas as pd
 
 def evaluate(model, val_loader, criterion, device, use_amp=False, is_binary=False):
     """
-    Evaluate a model on validation data.
+    Evaluate a model on validation data and measure inference time.
     
     Args:
         model: The model to evaluate
@@ -24,15 +26,20 @@ def evaluate(model, val_loader, criterion, device, use_amp=False, is_binary=Fals
         is_binary: Whether the task is binary classification
         
     Returns:
-        Tuple of (loss, accuracy)
+        Tuple of (loss, accuracy, inference_time_per_batch)
     """
+    import time
     model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
+    total_inference_time = 0.0
+    batch_count = 0
     
     with torch.no_grad():
         for features, labels in val_loader:
+            batch_count += 1
+            inference_start_time = time.time()
             features, labels = features.to(device), labels.to(device)
             labels_for_loss = labels.float().view(-1, 1) if is_binary else labels
             
@@ -45,8 +52,15 @@ def evaluate(model, val_loader, criterion, device, use_amp=False, is_binary=Fals
             predicted = (torch.sigmoid(outputs) > 0.5).long().view(-1) if is_binary else outputs.max(1)[1]
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
+            
+            # Measure inference time for this batch
+            inference_time = time.time() - inference_start_time
+            total_inference_time += inference_time
     
-    return running_loss / total, correct / total
+    # Calculate average inference time per batch
+    avg_inference_time_per_batch = total_inference_time / batch_count if batch_count > 0 else 0
+    
+    return running_loss / total, correct / total, avg_inference_time_per_batch
 
 def compute_roc_data(model, data_loader, device, use_amp=False, is_binary=False):
     """
@@ -60,11 +74,12 @@ def compute_roc_data(model, data_loader, device, use_amp=False, is_binary=False)
         is_binary: Whether the task is binary classification
         
     Returns:
-        Tuple of (labels, probabilities)
+        Tuple of (labels, probabilities, predictions)
     """
     model.eval()
     all_labels = []
     all_probs = []
+    all_preds = []
     
     with torch.no_grad():
         for features, labels in data_loader:
@@ -73,20 +88,112 @@ def compute_roc_data(model, data_loader, device, use_amp=False, is_binary=False)
             with torch.amp.autocast('cuda', enabled=use_amp):
                 outputs = model(features)
             
-            # Get probabilities
+            # Get probabilities and predictions
             if is_binary:
                 probs = torch.sigmoid(outputs).view(-1).cpu().numpy()
+                preds = (torch.sigmoid(outputs) > 0.5).long().view(-1).cpu().numpy()
             else:
                 probs = torch.softmax(outputs, dim=1).cpu().numpy()
+                preds = outputs.argmax(dim=1).cpu().numpy()
             
             all_labels.append(labels.numpy())
             all_probs.append(probs)
+            all_preds.append(preds)
     
     # Concatenate all batches
     labels = np.concatenate(all_labels)
     probs = np.concatenate(all_probs)
+    preds = np.concatenate(all_preds)
     
-    return labels, probs
+    return labels, probs, preds
+
+def generate_metrics_table(fold_matrices, output_dir, is_binary=True, model_type=""):
+    """
+    Generate a table of metrics (F1, sensitivity, specificity) across folds.
+    
+    Args:
+        fold_matrices: Dictionary mapping fold names to their confusion matrices
+        output_dir: Directory to save the table
+        is_binary: Whether the task is binary classification
+        model_type: The type of model used (for table title)
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    # Calculate metrics for each fold
+    fold_metrics = {}
+    for fold_name, cm in fold_matrices.items():
+        fold_metrics[fold_name] = calculate_metrics_from_confusion_matrix(cm, is_binary)
+    
+    # Create a DataFrame for the metrics
+    metrics_df = pd.DataFrame(columns=['Fold', 'F1', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy'])
+    
+    for fold_name, metrics in fold_metrics.items():
+        metrics_df = metrics_df._append({
+            'Fold': fold_name,
+            'F1': metrics['f1'],
+            'Sensitivity': metrics['sensitivity'],
+            'Specificity': metrics['specificity'],
+            'Precision': metrics['precision'],
+            'Accuracy': metrics['accuracy']
+        }, ignore_index=True)
+    
+    # Calculate mean and standard deviation
+    mean_metrics = metrics_df[['F1', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy']].mean()
+    std_metrics = metrics_df[['F1', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy']].std()
+    
+    # Add mean and std to the DataFrame
+    metrics_df = metrics_df._append({
+        'Fold': 'Mean',
+        'F1': mean_metrics['F1'],
+        'Sensitivity': mean_metrics['Sensitivity'],
+        'Specificity': mean_metrics['Specificity'],
+        'Precision': mean_metrics['Precision'],
+        'Accuracy': mean_metrics['Accuracy']
+    }, ignore_index=True)
+    
+    metrics_df = metrics_df._append({
+        'Fold': 'Std',
+        'F1': std_metrics['F1'],
+        'Sensitivity': std_metrics['Sensitivity'],
+        'Specificity': std_metrics['Specificity'],
+        'Precision': std_metrics['Precision'],
+        'Accuracy': std_metrics['Accuracy']
+    }, ignore_index=True)
+    
+    # Save as CSV
+    metrics_df.to_csv(output_path / f'{model_type}_metrics.csv', index=False)
+    
+    # Save as LaTeX table
+    with open(output_path / f'{model_type}_metrics_table.tex', 'w') as f:
+        f.write("\\begin{table}[htbp]\n")
+        f.write("\\centering\n")
+        f.write(f"\\caption{{Performance Metrics for {model_type} Across Folds}}\n")
+        f.write("\\begin{tabular}{|l|c|c|c|c|c|}\n")
+        f.write("\\hline\n")
+        f.write("\\textbf{Fold} & \\textbf{F1} & \\textbf{Sensitivity} & \\textbf{Specificity} & \\textbf{Precision} & \\textbf{Accuracy} \\\\ \\hline\n")
+        
+        for _, row in metrics_df.iterrows():
+            fold = row['Fold']
+            f1 = row['F1']
+            sens = row['Sensitivity']
+            spec = row['Specificity']
+            prec = row['Precision']
+            acc = row['Accuracy']
+            
+            if fold in ['Mean', 'Std']:
+                f.write(f"\\textbf{{{fold}}} & {f1:.4f} & {sens:.4f} & {spec:.4f} & {prec:.4f} & {acc:.4f} \\\\ \\hline\n")
+            else:
+                f.write(f"{fold} & {f1:.4f} & {sens:.4f} & {spec:.4f} & {prec:.4f} & {acc:.4f} \\\\ \\hline\n")
+        
+        f.write("\\end{tabular}\n")
+        f.write("\\label{tab:metrics_" + model_type.replace("_", "") + "}\n")
+        f.write("\\end{table}\n")
+    
+    print(f"Saved metrics table for {model_type} to {output_path}")
+    
+    return mean_metrics, std_metrics
+
 
 def generate_tables(fold_results, output_dir):
     """
@@ -322,20 +429,20 @@ def plot_training_curves(fold_name, history, output_dir):
     Args:
         fold_name: Name of the fold
         history: Dictionary containing training history with keys:
-                 'train_losses', 'val_losses', 'train_accs', 'val_accs'
+                 'train_loss', 'val_loss', 'train_acc', 'val_acc'
         output_dir: Directory to save the plots
     """
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True, parents=True)
     
-    epochs = range(1, len(history['train_losses']) + 1)
+    epochs = range(1, len(history['train_loss']) + 1)
     
     # Create figure with two subplots (loss and accuracy)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     # Plot loss curves
-    ax1.plot(epochs, history['train_losses'], 'b-', label='Training Loss')
-    ax1.plot(epochs, history['val_losses'], 'r-', label='Validation Loss')
+    ax1.plot(epochs, history['train_loss'], 'b-', label='Training Loss')
+    ax1.plot(epochs, history['val_loss'], 'r-', label='Validation Loss')
     ax1.set_title(f'{fold_name} - Loss Curves')
     ax1.set_xlabel('Epochs')
     ax1.set_ylabel('Loss')
@@ -343,8 +450,8 @@ def plot_training_curves(fold_name, history, output_dir):
     ax1.grid(alpha=0.3)
     
     # Plot accuracy curves
-    ax2.plot(epochs, history['train_accs'], 'b-', label='Training Accuracy')
-    ax2.plot(epochs, history['val_accs'], 'r-', label='Validation Accuracy')
+    ax2.plot(epochs, history['train_acc'], 'b-', label='Training Accuracy')
+    ax2.plot(epochs, history['val_acc'], 'r-', label='Validation Accuracy')
     ax2.set_title(f'{fold_name} - Accuracy Curves')
     ax2.set_xlabel('Epochs')
     ax2.set_ylabel('Accuracy')
@@ -365,6 +472,208 @@ def plot_training_curves(fold_name, history, output_dir):
     plt.close()
     
     print(f"Saved training curves for {fold_name} to {output_path}")
+
+
+def plot_confusion_matrix(labels, predictions, fold_name, output_dir, class_names=None):
+    """
+    Generate and plot confusion matrix for a fold.
+    
+    Args:
+        labels: Ground truth labels
+        predictions: Model predictions
+        fold_name: Name of the fold
+        output_dir: Directory to save the plot
+        class_names: Optional list of class names for the labels
+        
+    Returns:
+        The confusion matrix
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    # Compute confusion matrix
+    cm = confusion_matrix(labels, predictions)
+    
+    # Normalize the confusion matrix
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    # Plot the raw counts (separate figure)
+    plt.figure(figsize=(6, 4))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True)
+    plt.title(f'{fold_name} - Confusion Matrix (Counts)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    
+    if class_names:
+        plt.xticks(np.arange(len(class_names)) + 0.5, class_names, rotation=45)
+        plt.yticks(np.arange(len(class_names)) + 0.5, class_names, rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / f'{fold_name}_confusion_matrix_counts.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot the normalized values (separate figure)
+    plt.figure(figsize=(6, 4))
+    sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues', cbar=True)
+    plt.title(f'{fold_name} - Confusion Matrix (Normalized)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    
+    if class_names:
+        plt.xticks(np.arange(len(class_names)) + 0.5, class_names, rotation=45)
+        plt.yticks(np.arange(len(class_names)) + 0.5, class_names, rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / f'{fold_name}_confusion_matrix_normalized.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved confusion matrices for {fold_name} to {output_path}")
+    
+    return cm
+
+
+def calculate_metrics_from_confusion_matrix(cm, is_binary=True):
+    """
+    Calculate various metrics from a confusion matrix.
+    
+    Args:
+        cm: Confusion matrix
+        is_binary: Whether the task is binary classification
+        
+    Returns:
+        Dictionary of metrics including F1, sensitivity, specificity, etc.
+    """
+    metrics = {}
+    
+    if is_binary:
+        # For binary classification
+        tn, fp, fn, tp = cm.ravel()
+        
+        # Sensitivity (Recall, True Positive Rate)
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        metrics['sensitivity'] = sensitivity
+        
+        # Specificity (True Negative Rate)
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        metrics['specificity'] = specificity
+        
+        # Precision (Positive Predictive Value)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        metrics['precision'] = precision
+        
+        # F1 Score
+        f1 = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+        metrics['f1'] = f1
+        
+        # Accuracy
+        accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+        metrics['accuracy'] = accuracy
+    else:
+        # For multi-class, calculate macro-averaged metrics
+        n_classes = cm.shape[0]
+        sensitivities = []
+        specificities = []
+        precisions = []
+        f1_scores = []
+        
+        for i in range(n_classes):
+            # True positives for class i
+            tp = cm[i, i]
+            
+            # False negatives for class i
+            fn = np.sum(cm[i, :]) - tp
+            
+            # False positives for class i
+            fp = np.sum(cm[:, i]) - tp
+            
+            # True negatives for class i
+            tn = np.sum(cm) - tp - fp - fn
+            
+            # Sensitivity for class i
+            sensitivity_i = tp / (tp + fn) if (tp + fn) > 0 else 0
+            sensitivities.append(sensitivity_i)
+            
+            # Specificity for class i
+            specificity_i = tn / (tn + fp) if (tn + fp) > 0 else 0
+            specificities.append(specificity_i)
+            
+            # Precision for class i
+            precision_i = tp / (tp + fp) if (tp + fp) > 0 else 0
+            precisions.append(precision_i)
+            
+            # F1 score for class i
+            f1_i = 2 * (precision_i * sensitivity_i) / (precision_i + sensitivity_i) if (precision_i + sensitivity_i) > 0 else 0
+            f1_scores.append(f1_i)
+        
+        # Macro-averaged metrics
+        metrics['sensitivity'] = np.mean(sensitivities)
+        metrics['specificity'] = np.mean(specificities)
+        metrics['precision'] = np.mean(precisions)
+        metrics['f1'] = np.mean(f1_scores)
+        metrics['accuracy'] = np.sum(np.diag(cm)) / np.sum(cm) if np.sum(cm) > 0 else 0
+        
+        # Store per-class metrics as well
+        metrics['per_class'] = {
+            'sensitivity': sensitivities,
+            'specificity': specificities,
+            'precision': precisions,
+            'f1': f1_scores
+        }
+    
+    return metrics
+
+
+def plot_combined_confusion_matrix(fold_matrices, output_dir, class_names=None):
+    """
+    Generate and plot a combined confusion matrix from all folds.
+    
+    Args:
+        fold_matrices: Dictionary mapping fold names to their confusion matrices
+        output_dir: Directory to save the plot
+        class_names: Optional list of class names for the labels
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    # Combine all matrices
+    combined_cm = sum(fold_matrices.values())
+    
+    # Normalize the combined confusion matrix
+    combined_cm_normalized = combined_cm.astype('float') / combined_cm.sum(axis=1)[:, np.newaxis]
+    
+    # Plot the raw counts (separate figure)
+    plt.figure(figsize=(6, 4))
+    sns.heatmap(combined_cm, annot=True, fmt='d', cmap='Blues', cbar=True)
+    plt.title('Combined Confusion Matrix (Counts)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    
+    if class_names:
+        plt.xticks(np.arange(len(class_names)) + 0.5, class_names, rotation=45)
+        plt.yticks(np.arange(len(class_names)) + 0.5, class_names, rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'combined_confusion_matrix_counts.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot the normalized values (separate figure)
+    plt.figure(figsize=(6, 4))
+    sns.heatmap(combined_cm_normalized, annot=True, fmt='.2f', cmap='Blues', cbar=True)
+    plt.title('Combined Confusion Matrix (Normalized)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    
+    if class_names:
+        plt.xticks(np.arange(len(class_names)) + 0.5, class_names, rotation=45)
+        plt.yticks(np.arange(len(class_names)) + 0.5, class_names, rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'combined_confusion_matrix_normalized.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved combined confusion matrices to {output_path}")
+    
+    return combined_cm
 
 
 def plot_combined_training_curves(fold_histories, output_dir):
@@ -393,14 +702,14 @@ def plot_combined_training_curves(fold_histories, output_dir):
     
     for i, (fold_name, history) in enumerate(fold_histories.items()):
         color = colors[i % len(colors)]
-        epochs = range(1, len(history['train_losses']) + 1)
+        epochs = range(1, len(history['train_loss']) + 1)
         max_epochs = max(max_epochs, len(epochs))
         
         # Pad histories to ensure they're all the same length
-        train_losses = history['train_losses']
-        val_losses = history['val_losses']
-        train_accs = history['train_accs']
-        val_accs = history['val_accs']
+        train_losses = history['train_loss']
+        val_losses = history['val_loss']
+        train_accs = history['train_acc']
+        val_accs = history['val_acc']
         
         all_train_losses.append(train_losses)
         all_val_losses.append(val_losses)

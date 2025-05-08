@@ -16,11 +16,13 @@ from sklearn.metrics import roc_curve, auc, roc_auc_score
 from config import (
     BASE_DATA_DIR, FEATURES_DIR, OUTPUT_DIR, BATCH_SIZE, LEARNING_RATE,
     WEIGHT_DECAY, MLP_HIDDEN_DIMS, DROPOUT_RATE, NUM_EPOCHS, SEED, USE_AMP,
-    NUM_WORKERS, PIN_MEMORY, PATIENCE, MIN_DELTA
+    NUM_WORKERS, PIN_MEMORY, PATIENCE, MIN_DELTA, GRAD_CLIP
 )
 from utils import set_seed, get_device, save_json
-from model import MLPClassifier
-from evaluation import evaluate, compute_roc_data, generate_tables, plot_roc_curves, plot_training_curves, plot_combined_training_curves
+from model import MLPClassifier, count_parameters
+from evaluation import (evaluate, compute_roc_data, generate_tables, plot_roc_curves, 
+                      plot_training_curves, plot_combined_training_curves, plot_confusion_matrix,
+                      plot_combined_confusion_matrix, generate_metrics_table, calculate_metrics_from_confusion_matrix)
 
 
 class FeatureDataset(torch.utils.data.Dataset):
@@ -47,7 +49,9 @@ class FeatureDataset(torch.utils.data.Dataset):
 
 def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, device, 
                    epoch, num_epochs, use_amp=False, scaler=None, is_binary=False, grad_clip=None):
-    """Train the model for one epoch"""
+    """Train the model for one epoch and measure training time"""
+    import time
+    start_time = time.time()
     model.train()
     running_loss = 0.0
     correct = 0
@@ -90,12 +94,15 @@ def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, device
             print(f"Epoch [{epoch+1}/{num_epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
                  f"Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}%")
     
-    return running_loss / total, correct / total
+    # Calculate training time for this epoch
+    epoch_time = time.time() - start_time
+    
+    return running_loss / total, correct / total, epoch_time
 
 
 def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, dropout_rate=None, 
                batch_size=None, num_epochs=None, learning_rate=None, weight_decay=None, 
-               device=None, use_amp=None, data_version=None):
+               device=None, use_amp=None, data_version=None, model_type=None, binary=True):
     """
     Train a model for one fold.
     
@@ -111,23 +118,27 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
         weight_decay: Weight decay for the optimizer
         device: Device to train on
         use_amp: Whether to use automatic mixed precision
+        data_version: Dataset version to use
+        model_type: Model type used for feature extraction
+        binary: Whether to use binary classification mode (default: True)
         
     Returns:
         Tuple of (model, train_accuracy, validation_accuracy, validation_auc)
     """
-    # Get data version from parameter or environment variable
+    # Get data version and model type from parameter or environment variable
     import os
     data_version = data_version or os.environ.get("DATA_VERSION", "normalized")
+    model_type = model_type or os.environ.get("MODEL_TYPE", "mobilenet_v3")
     
     # Use default values from config if not provided
     if features_dir is None:
-        features_dir = Path(FEATURES_DIR) / data_version
+        features_dir = Path(FEATURES_DIR) / data_version / model_type
     else:
         features_dir = Path(features_dir)
     
     # Create version-specific output directory
     if output_dir is None:
-        output_dir = Path(OUTPUT_DIR) / data_version / fold_name
+        output_dir = Path(OUTPUT_DIR) / data_version / model_type / fold_name
     else:
         output_dir = Path(output_dir)
     hidden_dims = MLP_HIDDEN_DIMS if hidden_dims is None else hidden_dims
@@ -149,48 +160,67 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
     if not train_features_path.exists():
         raise FileNotFoundError(f"Training features not found at {train_features_path}")
     
-    if not val_features_path.exists():
-        logging.warning(f"Validation features not found at {val_features_path}. Using training data for validation.")
-        val_features_path = train_features_path
-    
-    # Load data
     train_data = torch.load(train_features_path)
-    train_features = train_data['features']
-    train_labels = train_data['labels']
-    feature_dim = train_features.shape[1]
-    num_classes = train_data['num_classes']
+    
+    # Get feature dimension from the data
+    feature_dim = train_data['features'].shape[1]
     
     # Create datasets
-    train_dataset = FeatureDataset(train_features, train_labels)
+    train_dataset = FeatureDataset(train_data['features'], train_data['labels'])
     
-    val_data = torch.load(val_features_path)
-    val_features = val_data['features']
-    val_labels = val_data['labels']
-    val_dataset = FeatureDataset(val_features, val_labels)
-    
-    # Create dataloaders
+    # Create data loaders
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
-        num_workers=NUM_WORKERS, persistent_workers=NUM_WORKERS > 0
+        train_dataset, batch_size=BATCH_SIZE["train"], shuffle=True,
+        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY
     )
+    
+    # Load validation data
+    val_features_path = features_dir / f"{fold_name}_val_features.pt"
+    val_data = torch.load(val_features_path)
+    val_dataset = FeatureDataset(val_data['features'], val_data['labels'])
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True,
-        num_workers=NUM_WORKERS, persistent_workers=NUM_WORKERS > 0
+        val_dataset, batch_size=BATCH_SIZE["val"], shuffle=False,
+        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY
     )
+    
+    # Determine number of classes
+    num_classes = train_data['num_classes'] if 'num_classes' in train_data else len(torch.unique(train_data['labels']))
+    if binary and num_classes > 2:
+        print(f"Warning: Binary mode requested but found {num_classes} classes. Forcing binary mode.")
+        num_classes = 2
+    
+    # Get model-specific hyperparameters
+    hidden_dims = MLP_HIDDEN_DIMS[model_type]
+    dropout_rate = DROPOUT_RATE[model_type]
+    learning_rate = LEARNING_RATE[model_type]
+    weight_decay = WEIGHT_DECAY[model_type]
+    
+    print(f"Using model-specific hyperparameters for {model_type}:")
+    print(f"  - Hidden dims: {hidden_dims}")
+    print(f"  - Dropout rate: {dropout_rate}")
+    print(f"  - Learning rate: {learning_rate}")
+    print(f"  - Weight decay: {weight_decay}")
     
     # Initialize model
     model = MLPClassifier(
         input_dim=feature_dim,
         num_classes=num_classes,
         hidden_dims=hidden_dims,
-        dropout_rate=dropout_rate
+        dropout_rate=dropout_rate,
+        model_type=model_type
     ).to(device)
+    
+    # Initialize optimizer and scheduler
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=10, verbose=True
+    )
     
     # Loss function based on number of classes
     is_binary = (num_classes == 2)
     
     # Print class distribution
-    class_counts = torch.bincount(train_labels)
+    class_counts = torch.bincount(train_data['labels'])
     print(f"Class distribution in training set: {class_counts.tolist()}")
     
     # Loss function with class weights
@@ -202,22 +232,22 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
         fixed_weights[0] = 0.9
         criterion = nn.CrossEntropyLoss(weight=fixed_weights.to(device))
     
-    # Optimizer
+    # Use model-specific optimizer parameters
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=0.0002,
+        lr=learning_rate,  # Use model-specific learning rate
         betas=(0.9, 0.999),
         eps=1.0e-08,
-        weight_decay=1.0e-05
+        weight_decay=weight_decay  # Use model-specific weight decay
     )
     
     # Learning rate scheduler
     steps_per_epoch = len(train_loader)
-    total_steps = steps_per_epoch * num_epochs
+    total_steps = steps_per_epoch * NUM_EPOCHS
     
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=0.001,
+        max_lr=learning_rate * 5,  # Scale max_lr based on base learning rate
         total_steps=total_steps,
         pct_start=0.3,
         div_factor=25.0,
@@ -226,54 +256,60 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
     )
     
     # Setup AMP
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
-    grad_clip = 0.5
+    scaler = torch.amp.GradScaler('cuda') if USE_AMP else None
+    grad_clip = GRAD_CLIP if GRAD_CLIP is not None else 0.5
     
-    # Training history
+    # Count model parameters
+    param_count = count_parameters(model)
+    print(f"Number of trainable parameters: {param_count:,}")
+    
+    # Train the model
+    best_val_acc = 0.0
+    best_epoch = 0
     history = {
-        'train_losses': [],
-        'train_accs': [],
-        'val_losses': [],
-        'val_accs': [],
-        'best_epoch': 0,
-        'best_val_acc': 0.0,
-        'early_stopped': False,
-        'patience_counter': 0
+        'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': [],
+        'train_time_per_epoch': [], 'inference_time_per_batch': []
     }
     
-    best_val_acc = 0.0
-    best_model_state = None
-    patience_counter = 0  # Counter for early stopping
+    # Set up early stopping
+    patience = PATIENCE
+    min_delta = MIN_DELTA
+    counter = 0
+    best_val_loss = float('inf')
     
-    print(f"Starting training for {fold_name}:")
-    print(f"  - Training samples: {len(train_dataset)}")
-    print(f"  - Validation samples: {len(val_dataset)}")
+    # Set up AMP scaler if using mixed precision
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     print(f"  - Model: MLP with hidden dims {hidden_dims}, dropout {dropout_rate}")
-    print(f"  - Training: {num_epochs} epochs, batch size {batch_size}, lr {learning_rate}, weight decay {weight_decay}")
-    print(f"  - Device: {device}, AMP: {use_amp}")
+    print(f"  - Training: {NUM_EPOCHS} epochs, batch size {BATCH_SIZE['train']}, lr {learning_rate}, weight decay {weight_decay}")
+    print(f"  - Device: {device}, AMP: {USE_AMP}")
+    print(f"  - Feature extractor: {model_type} (dimension: {feature_dim})")
+    print(f"  - Number of classes: {num_classes}, Binary mode: {is_binary}")
+
     
-    for epoch in range(num_epochs):
+    for epoch in range(NUM_EPOCHS):
         # Train one epoch
-        train_loss, train_acc = train_one_epoch(
+        train_loss, train_acc, epoch_train_time = train_one_epoch(
             model, train_loader, criterion, optimizer, scheduler, device, 
-            epoch, num_epochs, use_amp, scaler, is_binary
+            epoch, NUM_EPOCHS, USE_AMP, scaler, is_binary
         )
         
         # Evaluate
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device, use_amp, is_binary)
+        val_loss, val_acc, inference_time = evaluate(model, val_loader, criterion, device, USE_AMP, is_binary)
         
         # Update history
-        history['train_losses'].append(train_loss)
-        history['train_accs'].append(train_acc)
-        history['val_losses'].append(val_loss)
-        history['val_accs'].append(val_acc)
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        history['train_time_per_epoch'].append(epoch_train_time)
+        history['inference_time_per_batch'].append(inference_time)
         
-        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         
         # Save best model and check for early stopping
         if val_acc > best_val_acc + MIN_DELTA:
             # Final evaluation on validation set
-            val_loss, val_acc = evaluate(model, val_loader, criterion, device, use_amp, is_binary)
+            val_loss, val_acc, _ = evaluate(model, val_loader, criterion, device, use_amp, is_binary)
             best_val_acc = val_acc  # Update the best validation accuracy
             best_epoch = epoch
             best_model_state = model.state_dict().copy()  # Save the current model state
@@ -298,14 +334,38 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
     # Plot training curves
     plot_training_curves(fold_name, history, output_dir)
     
-    # Save best model
+    # Save best model and model architecture information
     if best_model_state is not None:
+        # Save model state
         torch.save(best_model_state, output_dir / 'best_model.pt')
+        print(f"Saved best model to {output_dir / 'best_model.pt'}")
+        
+        # Save model architecture information
+        model_info = {
+            'input_dim': feature_dim,
+            'num_classes': num_classes,
+            'hidden_dims': hidden_dims,
+            'dropout_rate': dropout_rate,
+            'model_type': model_type,
+            'param_count': param_count,
+            'avg_train_time_per_epoch': np.mean(history['train_time_per_epoch']),
+            'avg_inference_time_per_batch': np.mean(history['inference_time_per_batch'])
+        }
+        with open(output_dir / 'model_info.json', 'w') as f:
+            json.dump(model_info, f, indent=2)
+        print(f"Saved model architecture information to {output_dir / 'model_info.json'}")
+    
+    # Load best model for final evaluation
+    if best_model_state is not None:
         model.load_state_dict(best_model_state)  # Load best model for final evaluation
     
-    # Compute ROC curve data
+    # Compute ROC curve data and predictions for confusion matrix
     try:
-        labels, probs = compute_roc_data(model, val_loader, device, use_amp, is_binary)
+        labels, probs, predictions = compute_roc_data(model, val_loader, device, USE_AMP, is_binary)
+        
+        # Generate confusion matrix
+        class_names = ["Negative", "Positive"] if is_binary else [str(i) for i in range(num_classes)]
+        confusion_mat = plot_confusion_matrix(labels, predictions, fold_name, output_dir, class_names=class_names)
         
         # For binary classification
         if is_binary or (isinstance(probs, np.ndarray) and len(probs.shape) == 1):
@@ -329,7 +389,7 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
         roc_auc = 0.0
     
     # Get the final training accuracy from history
-    final_train_acc = history['train_accs'][-1] if history['train_accs'] else 0.0
+    final_train_acc = history['train_acc'][-1] if history['train_acc'] else 0.0
     
     print(f"\nTraining completed for {fold_name}")
     if history.get('early_stopped', False):
@@ -337,7 +397,7 @@ def train_fold(fold_name, features_dir=None, output_dir=None, hidden_dims=None, 
     print(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch+1}")
     print(f"ROC AUC: {roc_auc:.4f}")
     
-    return model, final_train_acc, best_val_acc, roc_auc
+    return model, final_train_acc, best_val_acc, roc_auc, confusion_mat
 
 
 def objective(trial, fold_name, features_dir, output_dir, device, use_amp, num_epochs=100, seed=42):
@@ -383,7 +443,7 @@ def objective(trial, fold_name, features_dir, output_dir, device, use_amp, num_e
     device = device or get_device()
     use_amp = use_amp if use_amp is not None else USE_AMP
 
-    _, _, val_acc, val_auc = train_fold(
+    _, _, val_acc, val_auc, _ = train_fold(
         fold_name=fold_name,
         features_dir=features_dir,
         output_dir=trial_output_dir,
@@ -400,17 +460,22 @@ def objective(trial, fold_name, features_dir, output_dir, device, use_amp, num_e
     return val_acc
 
 
-def main():
+def main(binary=True):
     """
     Main entry point for the training script.
     Handles cross-validation training across all folds.
+    
+    Args:
+        binary: If True, use binary classification mode
     """
-    # Get the data version from environment variable or use default
+    # Get data version and model type from environment variables
     import os
     data_version = os.environ.get("DATA_VERSION", "normalized")
+    model_type = os.environ.get("MODEL_TYPE", "mobilenet_v3")
     
-    # Create version-specific output directory
-    output_dir = Path(OUTPUT_DIR) / data_version
+    # Determine feature directory based on data version and model type
+    features_dir = Path(FEATURES_DIR) / data_version / model_type
+    output_dir = Path(OUTPUT_DIR) / data_version / model_type
     output_dir.mkdir(exist_ok=True, parents=True)
     logging.info(f"Saving outputs to {output_dir}")
     
@@ -451,6 +516,16 @@ def main():
     fold_results = {}
     folds_roc_data = {}
     fold_histories = {}
+    fold_confusion_matrices = {}  # Store confusion matrices for each fold
+    
+    # Get parameter count for the model type
+    # Create a dummy model to count parameters
+    dummy_model = MLPClassifier(
+        input_dim=FEATURE_DIMS.get(model_type, 960),
+        num_classes=2 if binary else 10,  # Default to 10 classes for multi-class
+        model_type=model_type
+    )
+    param_count = count_parameters(dummy_model)
     
     # Train on each fold
     all_results = []
@@ -460,24 +535,82 @@ def main():
         print(f"Training on {fold_name}")
         print("=" * 50)
         
-        model, train_acc, val_acc, val_auc = train_fold(fold_name=fold_name, data_version=data_version)
+        model, train_acc, val_acc, val_auc, confusion_mat = train_fold(fold_name=fold_name, data_version=data_version, model_type=model_type, binary=binary)
         
-        # Load validation data for ROC analysis
-        val_features_path = features_dir / f"{fold_name}_val_features.pt"
-        val_data = torch.load(val_features_path)
-        val_dataset = FeatureDataset(val_data['features'], val_data['labels'])
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=BATCH_SIZE["val"], shuffle=False, pin_memory=True
-        )
+        # Store the confusion matrix
+        fold_confusion_matrices[fold_name] = confusion_mat
         
-        # Compute ROC data
-        num_classes = val_data['num_classes'] if 'num_classes' in val_data else len(torch.unique(val_data['labels']))
-        is_binary = (num_classes == 2)
-        labels, probs = compute_roc_data(model, val_loader, device, USE_AMP, is_binary)
+        # Get the model type from the training directory
+        best_model_path = Path(OUTPUT_DIR) / data_version / model_type / fold_name / 'best_model.pt'
+        model_info_path = Path(OUTPUT_DIR) / data_version / model_type / fold_name / 'model_info.json'
+        
+        if best_model_path.exists() and model_info_path.exists():
+            print(f"Loading best model from {best_model_path}")
+            
+            # Load model info to get the correct feature dimensions and model type
+            with open(model_info_path, 'r') as f:
+                model_info = json.load(f)
+                feature_dim = model_info.get('input_dim')
+                saved_model_type = model_info.get('model_type', model_type)
+                print(f"Found feature dimension {feature_dim} from model info")
+                print(f"Model was trained with model type: {saved_model_type}")
+            
+            # Make sure to load validation data from the correct features directory
+            correct_features_dir = Path(FEATURES_DIR) / data_version / saved_model_type
+            val_features_path = correct_features_dir / f"{fold_name}_val_features.pt"
+            
+            if val_features_path.exists():
+                print(f"Loading validation data from {val_features_path}")
+                val_data = torch.load(val_features_path)
+                val_dataset = FeatureDataset(val_data['features'], val_data['labels'])
+                val_loader = torch.utils.data.DataLoader(
+                    val_dataset, batch_size=BATCH_SIZE["val"], shuffle=False, pin_memory=True
+                )
+                
+                # Verify feature dimensions match
+                actual_feature_dim = val_data['features'].shape[1]
+                if actual_feature_dim != feature_dim:
+                    print(f"Warning: Feature dimension mismatch! Model expects {feature_dim} but data has {actual_feature_dim}")
+                    print(f"Skipping ROC computation for {fold_name} due to dimension mismatch")
+                    continue
+                
+                # Compute ROC data
+                num_classes = val_data['num_classes'] if 'num_classes' in val_data else len(torch.unique(val_data['labels']))
+                is_binary = (num_classes == 2)
+                
+                # Create a model with the same architecture as the saved one
+                loaded_model = MLPClassifier(
+                    input_dim=feature_dim,
+                    num_classes=num_classes,
+                    hidden_dims=MLP_HIDDEN_DIMS[saved_model_type] if isinstance(MLP_HIDDEN_DIMS, dict) else MLP_HIDDEN_DIMS,
+                    dropout_rate=DROPOUT_RATE[saved_model_type] if isinstance(DROPOUT_RATE, dict) else DROPOUT_RATE,
+                    model_type=saved_model_type
+                ).to(device)
+                
+                # Load the saved state
+                loaded_model.load_state_dict(torch.load(best_model_path))
+                loaded_model.eval()
+                
+                # Compute ROC data and predictions for confusion matrix
+                labels, probs, predictions = compute_roc_data(loaded_model, val_loader, device, USE_AMP, is_binary)
+                
+                # Generate confusion matrix
+                class_names = ["Negative", "Positive"] if is_binary else [str(i) for i in range(num_classes)]
+                confusion_mat = plot_confusion_matrix(labels, predictions, fold_name, output_dir, class_names=class_names)
+                
+                # Store the confusion matrix
+                fold_confusion_matrices[fold_name] = confusion_mat
+            else:
+                print(f"Warning: Validation features not found at {val_features_path}")
+                print(f"Skipping ROC computation for {fold_name}")
+                continue
+        else:
+            print(f"Warning: Best model not found at {best_model_path}. Skipping ROC computation for {fold_name}.")
+            continue
         folds_roc_data[fold_name] = {'labels': labels, 'probs': probs}
         
         # Load training history
-        history_path = Path(OUTPUT_DIR) / data_version / fold_name / 'training_history.json'
+        history_path = Path(OUTPUT_DIR) / data_version / model_type / fold_name / 'training_history.json'
         if history_path.exists():
             with open(history_path, 'r') as f:
                 history = json.load(f)
@@ -499,6 +632,15 @@ def main():
     # Plot combined training curves
     if fold_histories:
         plot_combined_training_curves(fold_histories, output_dir)
+        
+    # Generate combined confusion matrix from all folds
+    if fold_confusion_matrices:
+        # Determine class names based on binary mode
+        class_names = ["Negative", "Positive"] if binary else [str(i) for i in range(len(fold_confusion_matrices[list(fold_confusion_matrices.keys())[0]]))]
+        plot_combined_confusion_matrix(fold_confusion_matrices, output_dir, class_names=class_names)
+        
+        # Generate metrics table (F1, sensitivity, specificity) across folds
+        mean_metrics, std_metrics = generate_metrics_table(fold_confusion_matrices, output_dir, is_binary=binary, model_type=model_type)
     
     # Create summary
     summary = {
@@ -509,7 +651,10 @@ def main():
         'std_auc': std_auc,
         'num_folds': len(fold_names),
         'fold_names': fold_names,
-        'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
+        'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+        'param_count': param_count,
+        'avg_train_time_per_epoch': np.mean([np.mean(history['train_time_per_epoch']) for history in fold_histories.values()]) if fold_histories else 0,
+        'avg_inference_time_per_batch': np.mean([np.mean(history['inference_time_per_batch']) for history in fold_histories.values()]) if fold_histories else 0
     }
     
     save_json(summary, output_dir / 'cross_validation_summary.json')
@@ -519,33 +664,39 @@ def main():
     print(f"Mean validation accuracy: {summary['mean_val_acc']:.4f} ± {summary['std_val_acc']:.4f}")
     print(f"Mean ROC AUC: {summary['mean_auc']:.4f} ± {summary['std_auc']:.4f}")
     print("="*60)
-    
 
 if __name__ == "__main__":
     import time
     import argparse
     import os
     from utils import setup_logging
+    from model import ModelType
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train MLP models on precomputed features")
     parser.add_argument("--version", type=str, default="normalized", 
                        help="Dataset version to use (e.g., 'normalized', 'rgb')")
+    parser.add_argument("--model", type=str, default="mobilenet_v3",
+                       choices=[m.value for m in ModelType],
+                       help="Model type used for feature extraction")
+    parser.add_argument("--binary", action="store_true", default=True,
+                       help="Use binary classification mode")
     args = parser.parse_args()
     
     # Set environment variable for the data version
     os.environ["DATA_VERSION"] = args.version
+    os.environ["MODEL_TYPE"] = args.model
     
     # Set up logging
     log_dir = Path(OUTPUT_DIR)
     log_dir.mkdir(exist_ok=True, parents=True)
-    setup_logging(log_file=log_dir / f"training_{args.version}.log")
+    setup_logging(log_file=log_dir / f"training_{args.version}_{args.model}.log")
     
-    print(f"Training on features from version: {args.version}")
+    print(f"Training on features from version: {args.version}, model: {args.model}")
     
     try:
         start_time = time.time()
-        main()
+        main(binary=args.binary)
         duration = time.time() - start_time
         print(f"\nTotal training time: {duration/60:.2f} minutes")
     except KeyboardInterrupt:
@@ -553,7 +704,7 @@ if __name__ == "__main__":
     except FileNotFoundError as e:
         logging.error(f"File not found: {e}", exc_info=True)
         print(f"\nError: {e}")
-        print(f"Make sure to run feature extraction first with: ./run.sh --version {args.version} --stage features")
+        print(f"Make sure to run feature extraction first with: ./run.sh --version {args.version} --model {args.model} --stage features")
     except Exception as e:
         logging.error(f"Error during training: {e}", exc_info=True)
         print(f"\nError during training: {e}")
