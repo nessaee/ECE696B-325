@@ -16,7 +16,7 @@ from sklearn.metrics import roc_curve, auc, roc_auc_score
 from config import (
     BASE_DATA_DIR, FEATURES_DIR, OUTPUT_DIR, BATCH_SIZE, LEARNING_RATE,
     WEIGHT_DECAY, MLP_HIDDEN_DIMS, DROPOUT_RATE, NUM_EPOCHS, SEED, USE_AMP,
-    NUM_WORKERS, PIN_MEMORY, PATIENCE, MIN_DELTA, GRAD_CLIP
+    NUM_WORKERS, PIN_MEMORY, PATIENCE, MIN_DELTA, GRAD_CLIP, FEATURE_DIMS
 )
 from utils import set_seed, get_device, save_json
 from model import MLPClassifier, count_parameters
@@ -522,7 +522,7 @@ def main(binary=True):
     # Create a dummy model to count parameters
     dummy_model = MLPClassifier(
         input_dim=FEATURE_DIMS.get(model_type, 960),
-        num_classes=2 if binary else 10,  # Default to 10 classes for multi-class
+        num_classes=2 if binary else 3,  # Default to 10 classes for multi-class
         model_type=model_type
     )
     param_count = count_parameters(dummy_model)
