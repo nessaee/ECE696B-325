@@ -479,8 +479,8 @@ def main(binary=True):
     output_dir.mkdir(exist_ok=True, parents=True)
     logging.info(f"Saving outputs to {output_dir}")
     
-    # Find available folds in the version-specific directory
-    features_dir = Path(FEATURES_DIR) / data_version
+    # Find available folds in the version and model-specific directory
+    features_dir = Path(FEATURES_DIR) / data_version / model_type
     logging.info(f"Looking for fold data in {features_dir}")
     
     # Make sure the directory exists
