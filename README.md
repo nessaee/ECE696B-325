@@ -35,12 +35,34 @@ cd modules/mlp
 ./run.sh --version normalized --binary --model resnet50 --stage all
 ```
 
+## Reproducibility Example
+
+**Note**: MobileNetV3 features have been pre-extracted and uploaded to the repository for reproducibility purposes. You can train the MobileNetV3 model directly without needing to run the feature extraction step.
+
+```bash
+# Clone the repository
+git clone https://github.com/nessaee/ECE696B-325.git
+cd ECE696B-325
+
+# Train MobileNetV3 model with normalized data
+cd modules/mlp
+./run.sh --version normalized --binary --model mobilenet_v3 --stage train
+
+# Train MobileNetV3 model with RGB data
+./run.sh --version rgb --binary --model mobilenet_v3 --stage train
+
+# Generate consolidated results table
+./consolidate_results.sh
+```
+
+The pre-extracted features allow you to quickly evaluate the pipeline's training and evaluation capabilities without the computational overhead of feature extraction.
+
 ## Citation
 
 If you use this codebase in your research, please cite:
 
 ```
-@misc{UA-SLSM-MLP-Pipeline,
+@misc{UA-SLSM-Pipeline,
   author = {Ameer Nessaee},
   title = {SLSM Classification Pipeline},
   year = {2025},
