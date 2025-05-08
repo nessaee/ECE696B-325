@@ -6,7 +6,7 @@ This repository contains a comprehensive pipeline for training Multi-Layer Perce
 
 ## Key Features
 
-- **Multiple Feature Extractors**: Support for MobileNetV3, ResNet18, ResNet50, EfficientNetV2-S, and ViT-B/16
+- **Multiple Feature Extractors**: Support for MobileNetV3, ResNet18, ResNet50, EfficientNetV2-S
 - **Model-specific Hyperparameters**: Optimized hyperparameters for each architecture
 - **Cross-validation**: K-fold cross-validation with comprehensive metrics
 - **Performance Tracking**: Detailed metrics including F1 score, accuracy, AUC, and confusion matrices
@@ -41,14 +41,14 @@ If you use this codebase in your research, please cite:
 
 ```
 @misc{UA-SLSM-MLP-Pipeline,
-  author = {University of Arizona SLSM Team},
-  title = {UA-SLSM MLP Training Pipeline},
-  year = {2023},
+  author = {Ameer Nessaee},
+  title = {SLSM Classification Pipeline},
+  year = {2025},
   publisher = {GitHub},
   url = {https://github.com/nessaee/ECE696B-325}
 }
 ```
 
-## License
+<!-- ## License -->
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+<!-- This project is licensed under the MIT License - see the LICENSE file for details. -->
