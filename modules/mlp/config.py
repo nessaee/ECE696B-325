@@ -58,13 +58,53 @@ NUM_WORKERS = 8
 PIN_MEMORY = True
 
 # Model parameters
-MOBILENET_FEATURE_DIM = 960  # Output dimension of MobileNetV3 Large backbone
-MLP_HIDDEN_DIMS = [512, 256]
-DROPOUT_RATE = 0.5
+# Feature dimensions for different model types
+FEATURE_DIMS = {
+    "mobilenet_v3": 960,
+    "resnet18": 512,
+    "resnet50": 2048,
+    "efficientnet_v2_s": 1280,
+    "vit_b_16": 768
+}
 
-# Training parameters
-LEARNING_RATE = 2e-4
-WEIGHT_DECAY = 1e-5
+# Model-specific MLP hidden dimensions
+MLP_HIDDEN_DIMS = {
+    "mobilenet_v3": [512, 256],
+    "resnet18": [512, 256],
+    "resnet50": [1024, 512],
+    "efficientnet_v2_s": [768, 384],
+    "vit_b_16": [512, 256]
+}
+
+# Default for backward compatibility
+MOBILENET_FEATURE_DIM = FEATURE_DIMS["mobilenet_v3"]
+
+# Model-specific dropout rates
+DROPOUT_RATE = {
+    "mobilenet_v3": 0.5,
+    "resnet18": 0.5,
+    "resnet50": 0.6,
+    "efficientnet_v2_s": 0.4,
+    "vit_b_16": 0.3
+}
+
+# Model-specific learning rates
+LEARNING_RATE = {
+    "mobilenet_v3": 2e-4,
+    "resnet18": 1e-4,
+    "resnet50": 5e-5,
+    "efficientnet_v2_s": 1e-4,
+    "vit_b_16": 5e-5
+}
+
+# Model-specific weight decay
+WEIGHT_DECAY = {
+    "mobilenet_v3": 1e-5,
+    "resnet18": 1e-5,
+    "resnet50": 1e-4,
+    "efficientnet_v2_s": 1e-5,
+    "vit_b_16": 1e-4
+}
 NUM_EPOCHS = 100
 USE_AMP = True  # Automatic Mixed Precision
 GRAD_CLIP = None  # Set to a value (e.g., 1.0) to enable gradient clipping

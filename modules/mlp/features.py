@@ -1,6 +1,6 @@
 """
 Feature extraction utilities for the UA-SLSM MLP training pipeline.
-Provides functions for precomputing and extracting features from the MobileNetV3 backbone.
+Provides functions for precomputing and extracting features from various pretrained models.
 """
 
 import torch
@@ -8,6 +8,7 @@ import time
 import gc
 import json
 import logging
+import os
 from pathlib import Path
 
 from config import (
@@ -17,23 +18,32 @@ from config import (
 )
 from utils import get_device
 from dataset import create_train_val_datasets, get_dataloader
-from model import get_mobilenet_model, get_model_feature_extractor
+from model import get_model, get_model_feature_extractor, ModelType
 
-def precompute_features(version="normalized", binary_classification=True, device=None):
+def precompute_features(version="normalized", binary_classification=True, device=None, model_type=ModelType.MOBILENET_V3):
     """
-    Precompute features from the MobileNetV3 backbone for all images in the dataset
+    Precompute features from a pretrained model backbone for all images in the dataset
     and save them to disk for faster training of just the classifier head.
     
     Args:
         version (str): Dataset version to use (e.g., "normalized", "rgb")
         binary_classification (bool): Whether to use binary classification mode
         device (torch.device): Device to use for computation (if None, uses CUDA if available)
+        model_type (ModelType): Type of model to use for feature extraction
     """
-    print(f"Starting feature precomputation for version: {version}...")
+    # Handle string input for model_type
+    if isinstance(model_type, str):
+        model_type = ModelType.from_string(model_type)
+    
+    print(f"Starting feature precomputation for version: {version} using {model_type.value}...")
     
     # Configuration
     image_dir = DATASET_DIR / version
-    features_dir = FEATURES_DIR / version
+    model_subdir = model_type.value
+    features_dir = FEATURES_DIR / version / model_subdir
+    
+    # Create features directory if it doesn't exist
+    features_dir.mkdir(exist_ok=True, parents=True)
     
     # Get version-specific normalization parameters
     if version in NORMALIZATION_PARAMS:
@@ -44,9 +54,6 @@ def precompute_features(version="normalized", binary_classification=True, device
         mean = NORMALIZATION_PARAMS["normalized"]["MEAN"]
         std = NORMALIZATION_PARAMS["normalized"]["STD"]
         logging.warning(f"No normalization parameters found for version '{version}', using default")
-    
-    # Create features directory if it doesn't exist
-    features_dir.mkdir(exist_ok=True, parents=True)
     
     # Get all fold names from fold assignments file
     try:
@@ -84,8 +91,8 @@ def precompute_features(version="normalized", binary_classification=True, device
     
     # Load the model backbone only (without classifier head)
     num_classes = 2 if binary_classification else 3
-    model = get_mobilenet_model(num_classes=num_classes, freeze_backbone=True)
-    feature_extractor = get_model_feature_extractor(model)
+    model, feature_dim = get_model(model_type=model_type, num_classes=num_classes, freeze_backbone=True)
+    feature_extractor = get_model_feature_extractor(model, model_type=model_type)
     feature_extractor.to(device)
     feature_extractor.eval()
     
@@ -180,7 +187,8 @@ def precompute_features(version="normalized", binary_classification=True, device
             'shape': feature_shape,
             'binary_mode': binary_classification,
             'num_classes': train_ds.num_classes,
-            'class_names': train_ds.classes
+            'class_names': train_ds.classes,
+            'model_type': model_type.value
         }, train_feature_path)
         print(f"Saved training features to {train_feature_path}")
         
@@ -194,7 +202,8 @@ def precompute_features(version="normalized", binary_classification=True, device
                 'shape': feature_shape,
                 'binary_mode': binary_classification,
                 'num_classes': val_ds.num_classes,
-                'class_names': val_ds.classes
+                'class_names': val_ds.classes,
+                'model_type': model_type.value
             }, val_feature_path)
             print(f"Saved validation features to {val_feature_path}")
         else:
@@ -275,18 +284,25 @@ if __name__ == "__main__":
                         help="Use binary classification mode (default: True)")
     parser.add_argument("--multi", action="store_true", 
                         help="Use multi-class classification mode (overrides --binary)")
+    parser.add_argument("--model", type=str, default="mobilenet_v3",
+                        choices=[m.value for m in ModelType],
+                        help="Model type to use for feature extraction")
     args = parser.parse_args()
     
     # If --multi is specified, override binary mode
     binary_mode = not args.multi if args.multi else args.binary
     
+    # Convert model type string to enum
+    model_type = ModelType.from_string(args.model)
+    
     print(f"Starting feature extraction with settings:")
     print(f"  - Version: {args.version}")
+    print(f"  - Model: {model_type.value}")
     print(f"  - Classification mode: {'binary' if binary_mode else 'multi-class'}")
     
     try:
         # Call the feature precomputation function with the specified parameters
-        precompute_features(version=args.version, binary_classification=binary_mode)
+        precompute_features(version=args.version, binary_classification=binary_mode, model_type=model_type)
     except KeyboardInterrupt:
         print("\nFeature extraction interrupted by user.")
     except Exception as e:
