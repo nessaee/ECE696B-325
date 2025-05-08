@@ -83,13 +83,16 @@ def read_summary_json(base_dir, version, model_type):
         print(f"Error reading summary from {summary_path}: {e}")
         return None
 
-def generate_consolidated_table(base_dir, output_path):
+def generate_consolidated_table(base_dir, output_path, highlight_best=True, include_performance=True, include_efficiency=True):
     """
     Generate a consolidated LaTeX table comparing all architectures across versions.
     
     Args:
         base_dir: Base directory for results
         output_path: Path to save the LaTeX table
+        highlight_best: Whether to highlight the best metrics in each column
+        include_performance: Whether to include performance metrics (F1, Accuracy, AUC)
+        include_efficiency: Whether to include efficiency metrics (Params, Train, Infer)
     """
     # Create a DataFrame to store the consolidated results
     columns = ['Model', 'Version'] + [f"{m}_mean" for m in METRICS + ['AUC']] + [f"{m}_std" for m in METRICS + ['AUC']] + PERFORMANCE_METRICS
@@ -137,6 +140,25 @@ def generate_consolidated_table(base_dir, output_path):
     # Save as CSV for reference
     consolidated_df.to_csv(output_path.with_suffix('.csv'), index=False)
     
+    # Find best values for each metric if highlighting is enabled
+    best_values = {}
+    if highlight_best:
+        # Performance metrics
+        for metric in METRICS + ['AUC']:
+            metric_values = consolidated_df[f"{metric}_mean"].values
+            best_values[metric] = max(metric_values) if len(metric_values) > 0 else 0
+        
+        # Efficiency metrics - for params, lower is better
+        param_values = consolidated_df['param_count'].values
+        best_values['param_count'] = min(param_values) if len(param_values) > 0 else float('inf')
+        
+        # For training and inference time, lower is better
+        train_values = consolidated_df['avg_train_time_per_epoch'].values
+        best_values['avg_train_time_per_epoch'] = min(train_values) if len(train_values) > 0 else float('inf')
+        
+        infer_values = consolidated_df['avg_inference_time_per_batch'].values
+        best_values['avg_inference_time_per_batch'] = min(infer_values) if len(infer_values) > 0 else float('inf')
+    
     # Generate LaTeX table
     with open(output_path, 'w') as f:
         f.write("\\begin{table}[htbp]\n")
@@ -144,16 +166,44 @@ def generate_consolidated_table(base_dir, output_path):
         f.write("\\label{tab:cnn_performance}\n")
         f.write("\\centering\n")
         f.write("\\resizebox{\\columnwidth}{!}{%\n")  # Make table fit page width
-        f.write("\\begin{tabular}{lc|cc|ccc}\n")
+        
+        # Determine table format based on which metrics are included
+        if include_performance and include_efficiency:
+            f.write("\\begin{tabular}{lc|ccc|ccc}\n")
+        elif include_performance and not include_efficiency:
+            f.write("\\begin{tabular}{lc|ccc}\n")
+        elif not include_performance and include_efficiency:
+            f.write("\\begin{tabular}{lc|ccc}\n")
+        else:
+            # If no metrics included, just show model and version
+            f.write("\\begin{tabular}{lc}\n")
+            
         f.write("\\toprule\n")
         
         # Header row with multicolumns for grouping
-        f.write("\\multirow{2}{*}{\\textbf{Model}} & \\multirow{2}{*}{\\textbf{Version}} & ")
-        f.write("\\multicolumn{2}{c|}{\\textbf{Performance Metrics (\%)}} & ")
-        f.write("\\multicolumn{3}{c}{\\textbf{Efficiency Metrics}} \\\\\n")
+        f.write("\\multirow{2}{*}{\\textbf{Model}} & \\multirow{2}{*}{\\textbf{Version}}")
         
-        f.write("\\cmidrule(lr){3-4} \\cmidrule(lr){5-7}\n")
-        f.write("& & \\textbf{F1} & \\textbf{Acc.} & \\textbf{Params} & \\textbf{Train} & \\textbf{Infer.} \\\\\n")
+        if include_performance and include_efficiency:
+            # Both performance and efficiency metrics
+            f.write(" & \\multicolumn{3}{c|}{\\textbf{Performance Metrics (\\%)}} & ")
+            f.write("\\multicolumn{3}{c}{\\textbf{Efficiency Metrics}} \\\\\n")
+            f.write("\\cmidrule(lr){3-5} \\cmidrule(lr){6-8}\n")
+            f.write("& & \\textbf{F1} & \\textbf{Acc.} & \\textbf{AUC} & \\textbf{Params} & \\textbf{Train} & \\textbf{Infer.} \\\\\n")
+        elif include_performance and not include_efficiency:
+            # Only performance metrics
+            f.write(" & \\multicolumn{3}{c}{\\textbf{Performance Metrics (\\%)}} \\\\\n")
+            f.write("\\cmidrule(lr){3-5}\n")
+            f.write("& & \\textbf{F1} & \\textbf{Acc.} & \\textbf{AUC} \\\\\n")
+        elif not include_performance and include_efficiency:
+            # Only efficiency metrics
+            f.write(" & \\multicolumn{3}{c}{\\textbf{Efficiency Metrics}} \\\\\n")
+            f.write("\\cmidrule(lr){3-5}\n")
+            f.write("& & \\textbf{Params} & \\textbf{Train} & \\textbf{Infer.} \\\\\n")
+        else:
+            # No metrics, just model and version
+            f.write(" \\\\\n")
+            f.write("\\cmidrule(lr){1-2}\n")
+            
         f.write("\\midrule\n")
         
         # Format model names more nicely
@@ -193,27 +243,61 @@ def generate_consolidated_table(base_dir, output_path):
             # Add version
             f.write(f"{display_version} & ")
             
-            # Add F1 and Accuracy with mean ± std
-            for metric in METRICS:
-                mean = row[f"{metric}_mean"] * 100  # Convert to percentage
-                std = row[f"{metric}_std"] * 100    # Convert to percentage
-                f.write(f"${mean:.1f} \\pm {std:.1f}$ & ")
+            # Handle different combinations of metrics
+            if include_performance:
+                # Add F1 and Accuracy with mean ± std
+                for metric in METRICS:
+                    mean = row[f"{metric}_mean"] * 100  # Convert to percentage
+                    std = row[f"{metric}_std"] * 100    # Convert to percentage
+                    
+                    # Check if this is the best value and highlight if needed
+                    if highlight_best and abs(row[f"{metric}_mean"] - best_values[metric]) < 1e-6:
+                        f.write(f"$\\mathbf{{{mean:.1f} \\pm {std:.1f}}}$ & ")
+                    else:
+                        f.write(f"${mean:.1f} \\pm {std:.1f}$ & ")
+                
+                # Add AUC with mean ± std
+                auc_mean = row['AUC_mean']
+                auc_std = row['AUC_std']
+                
+                # Check if this is the best AUC value and highlight if needed
+                if highlight_best and abs(auc_mean - best_values['AUC']) < 1e-6:
+                    # If efficiency metrics follow, add an ampersand
+                    if include_efficiency:
+                        f.write(f"$\\mathbf{{{auc_mean:.2f} \\pm {auc_std:.2f}}}$ & ")
+                    else:
+                        f.write(f"$\\mathbf{{{auc_mean:.2f} \\pm {auc_std:.2f}}}$")
+                else:
+                    # If efficiency metrics follow, add an ampersand
+                    if include_efficiency:
+                        f.write(f"${auc_mean:.2f} \\pm {auc_std:.2f}$ & ")
+                    else:
+                        f.write(f"${auc_mean:.2f} \\pm {auc_std:.2f}$")
             
-            # Add AUC with mean ± std
-            auc_mean = row['AUC_mean']
-            auc_std = row['AUC_std']
-            
-            # Add parameter count (formatted with commas for readability)
-            param_count = row['param_count']
-            f.write(f"{param_count:,} & ")
-            
-            # Add training time per epoch (in seconds)
-            train_time = row['avg_train_time_per_epoch']
-            f.write(f"{train_time:.2f}s & ")
-            
-            # Add inference time per batch (in milliseconds)
-            infer_time = row['avg_inference_time_per_batch'] * 1000  # Convert to ms
-            f.write(f"{infer_time:.1f}ms")
+            if include_efficiency:
+                # Add parameter count (formatted with commas for readability)
+                param_count = row['param_count']
+                # Check if this is the best (lowest) parameter count and highlight if needed
+                if highlight_best and abs(param_count - best_values['param_count']) < 1e-6:
+                    f.write(f"\\textbf{{{param_count:,}}} & ")
+                else:
+                    f.write(f"{param_count:,} & ")
+                
+                # Add training time per epoch (in seconds)
+                train_time = row['avg_train_time_per_epoch']
+                # Check if this is the best (lowest) training time and highlight if needed
+                if highlight_best and abs(train_time - best_values['avg_train_time_per_epoch']) < 1e-6:
+                    f.write(f"\\textbf{{{train_time:.2f}s}} & ")
+                else:
+                    f.write(f"{train_time:.2f}s & ")
+                
+                # Add inference time per batch (in milliseconds)
+                infer_time = row['avg_inference_time_per_batch'] * 1000  # Convert to ms
+                # Check if this is the best (lowest) inference time and highlight if needed
+                if highlight_best and abs(row['avg_inference_time_per_batch'] - best_values['avg_inference_time_per_batch']) < 1e-6:
+                    f.write(f"\\textbf{{{infer_time:.1f}ms}}")
+                else:
+                    f.write(f"{infer_time:.1f}ms")
             
             f.write(" \\\\\n")
         
@@ -231,6 +315,18 @@ def main():
                         help="Base directory for results")
     parser.add_argument("--output", type=str, default="../../results/consolidated_results_table.tex",
                         help="Path to save the LaTeX table")
+    parser.add_argument("--highlight-best", action="store_true", default=True,
+                        help="Highlight the best metrics in each column")
+    parser.add_argument("--no-highlight-best", action="store_false", dest="highlight_best",
+                        help="Don't highlight the best metrics")
+    parser.add_argument("--include-performance", action="store_true", default=True,
+                        help="Include performance metrics (F1, Accuracy, AUC)")
+    parser.add_argument("--no-performance", action="store_false", dest="include_performance",
+                        help="Exclude performance metrics")
+    parser.add_argument("--include-efficiency", action="store_true", default=True,
+                        help="Include efficiency metrics (Params, Train, Infer)")
+    parser.add_argument("--no-efficiency", action="store_false", dest="include_efficiency",
+                        help="Exclude efficiency metrics")
     
     args = parser.parse_args()
     
@@ -240,7 +336,10 @@ def main():
     # Create output directory if it doesn't exist
     output_path.parent.mkdir(exist_ok=True, parents=True)
     
-    generate_consolidated_table(base_dir, output_path)
+    generate_consolidated_table(base_dir, output_path, 
+                               highlight_best=args.highlight_best,
+                               include_performance=args.include_performance,
+                               include_efficiency=args.include_efficiency)
 
 if __name__ == "__main__":
     main()
